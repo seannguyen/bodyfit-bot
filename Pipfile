@@ -6,6 +6,9 @@ name = "pypi"
 [packages]
 requests = "*"
 beautifulsoup4 = "*"
+lxml = "*"
+selenium = "*"
+dynaconf = "*"
 
 [dev-packages]
 black = "*"
