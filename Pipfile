@@ -10,6 +10,7 @@ lxml = "*"
 selenium = "*"
 dynaconf = "*"
 flask = "*"
+sib-api-v3-sdk = "*"
 
 [dev-packages]
 black = "*"

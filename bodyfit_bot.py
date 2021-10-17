@@ -1,3 +1,4 @@
+from calendar import weekday
 from requests import post, get
 import logging
 from bs4 import BeautifulSoup
@@ -13,6 +14,7 @@ import os
 from config import settings
 import threading
 from urllib.parse import urlparse, parse_qs
+import sib_api_v3_sdk
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
@@ -38,6 +40,26 @@ class BodyfitBot:
     __password = settings.password
     __trainer_id = settings.trainer_id
     __trid = settings.trid
+    __email_api_instance = None
+    __email_sender = None
+    __email_sendTo = None
+
+    def __init__(self) -> None:
+        # Setup Email Notification
+        configuration = sib_api_v3_sdk.Configuration()
+        configuration.api_key["api-key"] = settings.sendinblue_api_key
+
+        # create an instance of the API class
+        self.__email_api_instance = sib_api_v3_sdk.TransactionalEmailsApi(
+            sib_api_v3_sdk.ApiClient(configuration)
+        )
+
+        self.__email_sender = sib_api_v3_sdk.SendSmtpEmailSender(
+            name="BFT Bot", email="bot@seannguyen.me"
+        )
+        self.__email_sendTo = sib_api_v3_sdk.SendSmtpEmailTo(
+            name=settings.notification_email, email=settings.notification_email
+        )
 
     def bookSlot(self):
         logger.info("Start booking slots")
@@ -45,10 +67,51 @@ class BodyfitBot:
             cookies = self.__login()
             result = self.__getAndBookSlots(cookies)
             logger.info(f"Result {result}")
+            self.__send_success_email(result)
         except Exception as e:
             logger.error(e)
+            self.__send_failure_email()
 
         logger.info("Finished booking slots")
+
+    def __send_failure_email(self):
+        send_smtp_email = sib_api_v3_sdk.SendSmtpEmail(
+            sender=self.__email_sender,
+            to=[self.__email_sendTo],
+            html_content=f"{datetime.datetime.today()} Something went wrong when booking BFT classes, please check manually",
+            subject="Something went wrong when booking BFT classes",
+        )
+
+        self.__email_api_instance.send_transac_email(send_smtp_email)
+
+    def __send_success_email(self, results):
+        html_content = "<h3>Finished booking classes, here is the result</h3>"
+        for result_slot in results:
+            date_str = (
+                result_slot["date"].strftime("%A, %B %d")
+                if "date" in result_slot
+                else result_slot["day_of_week"]
+            )
+            time_str = result_slot["time_of_day"]
+            status_str = "Unknown, you might want to check this slot manually"
+            if result_slot["state"] == SLOT_STATUS_PENDING:
+                status_str = "Can't find this slot to book"
+            elif result_slot["state"] == SLOT_STATUS_BOOKED:
+                status_str = "Booked"
+            elif result_slot["state"] == SLOT_STATUS_WAITLISTED:
+                status_str = "Waitlisted"
+            elif result_slot["state"] == SLOT_STATUS_FULL:
+                status_str = "Fulled, unable to join waitlist"
+            html_content += f"<p>{date_str} {time_str}: <b>{status_str}</b></p>"
+
+        send_smtp_email = sib_api_v3_sdk.SendSmtpEmail(
+            sender=self.__email_sender,
+            to=[self.__email_sendTo],
+            html_content=html_content,
+            subject="Booking Result",
+        )
+
+        self.__email_api_instance.send_transac_email(send_smtp_email)
 
     def __login(self):
         resp = post(
@@ -63,6 +126,7 @@ class BodyfitBot:
                 "trid": self.__trid,
             },
             allow_redirects=False,
+            timeout=30,
         )
 
         if resp.status_code >= 400:
@@ -111,6 +175,7 @@ class BodyfitBot:
                 "page": page,
             },
             cookies=cookies,
+            timeout=30,
         )
 
         if resp.status_code >= 400:
@@ -129,7 +194,7 @@ class BodyfitBot:
         for day_schedule in day_schedules:
             date_str = day_schedule.select_one(".schedule-list-day").text
             slot_date = datetime.strptime(date_str, "%A, %B %d, %Y")
-            weekday_key = slot_date.weekday()
+            weekday_key = slot_date.strftime("%a")
             if weekday_key not in slots_by_weekday:
                 slots_by_weekday[weekday_key] = {}
             slots = day_schedule.select(".schedule")
@@ -143,11 +208,13 @@ class BodyfitBot:
                     slot_state = SLOT_STATUS_WAITLISTED
 
                 book_class_button = slot.select_one("button.bookClass")
+                book_class_url = None
                 if book_class_button:
                     onclick_content = book_class_button["onclick"]
                     m = re.search("'(https.*)'", onclick_content)
                     book_class_url = m.group(1)
                 join_waitlist_button = slot.select_one("button.join_wait_list")
+                join_waitlist_url = None
                 if join_waitlist_button:
                     join_waitlist_url = join_waitlist_button["data-purl"]
                     slot_state = SLOT_STATUS_WAITLISTABLE
@@ -157,10 +224,9 @@ class BodyfitBot:
                 slot_time = datetime.strptime(time_str, "%I:%M %p")
                 slots_by_weekday[weekday_key][slot_time.strftime("%H:%M")] = {
                     "state": slot_state,
-                    "book_class_url": book_class_url if book_class_button else None,
-                    "join_waitlist_url": join_waitlist_url
-                    if join_waitlist_button
-                    else None,
+                    "book_class_url": book_class_url,
+                    "join_waitlist_url": join_waitlist_url,
+                    "date": slot_date,
                 }
         logger.info(f"Success parse slots information from html page {page}")
         return slots_by_weekday
@@ -170,6 +236,7 @@ class BodyfitBot:
             f"Processing desired slot day of week: {desired_slot['day_of_week']} time of day: {desired_slot['time_of_day']}"
         )
         try:
+            desired_slot["date"] = attempted_slot["date"]
             if attempted_slot["state"] == SLOT_STATUS_PENDING:
                 self.__book_available_slot(cookies, desired_slot, attempted_slot)
                 return
@@ -237,7 +304,7 @@ class BodyfitBot:
             },
             allow_redirects=False,
             cookies=cookies,
-            timeout=60,
+            timeout=30,
         )
 
         if resp.status_code >= 400:
