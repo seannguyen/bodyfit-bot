@@ -12,6 +12,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 import os
 from config import settings
 import threading
+from urllib.parse import urlparse, parse_qs
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
@@ -23,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 SLOT_STATUS_PENDING = "SLOT_STATUS_PENDING"
 SLOT_STATUS_BOOKED = "SLOT_STATUS_BOOKED"
+SLOT_STATUS_WAITLISTABLE = "SLOT_STATUS_WAITLISTABLE"
 SLOT_STATUS_WAITLISTED = "SLOT_STATUS_WAITLISTED"
 SLOT_STATUS_FULL = "SLOT_STATUS_FULL"
 SLOT_STATUS_FAILED = "SLOT_STATUS_FAILED"
@@ -146,6 +148,9 @@ class BodyfitBot:
                     m = re.search("'(https.*)'", onclick_content)
                     book_class_url = m.group(1)
                 join_waitlist_button = slot.select_one("button.join_wait_list")
+                if join_waitlist_button:
+                    join_waitlist_url = join_waitlist_button["data-purl"]
+                    slot_state = SLOT_STATUS_WAITLISTABLE
 
                 time_str = slot.select_one(":first-child").text.split("to")[0]
                 time_str = time_str.strip()
@@ -153,15 +158,24 @@ class BodyfitBot:
                 slots_by_weekday[weekday_key][slot_time.strftime("%H:%M")] = {
                     "state": slot_state,
                     "book_class_url": book_class_url if book_class_button else None,
+                    "join_waitlist_url": join_waitlist_url
+                    if join_waitlist_button
+                    else None,
                 }
         logger.info(f"Success parse slots information from html page {page}")
         return slots_by_weekday
 
     def __attemptBook(self, cookies, desired_slot, attempted_slot):
         logger.info(
-            f"Start booking slot day of week: {desired_slot['day_of_week']} time of day: {desired_slot['time_of_day']}"
+            f"Processing desired slot day of week: {desired_slot['day_of_week']} time of day: {desired_slot['time_of_day']}"
         )
         try:
+            if attempted_slot["state"] == SLOT_STATUS_PENDING:
+                self.__book_available_slot(cookies, desired_slot, attempted_slot)
+                return
+            if attempted_slot["state"] == SLOT_STATUS_WAITLISTABLE:
+                self.__join_waitlist(cookies, desired_slot, attempted_slot)
+                return
             if attempted_slot["state"] != SLOT_STATUS_PENDING:
                 desired_slot["state"] = attempted_slot["state"]
                 logger.info(
@@ -169,36 +183,72 @@ class BodyfitBot:
                 )
                 return
 
-            driver = self.__prepare_chrome_driver()
-            wait = WebDriverWait(driver, 10)
-
-            driver.get("https://clients.onefitstop.com")
-            driver.add_cookie(
-                {
-                    "name": "PHPSESSID",
-                    "value": cookies["PHPSESSID"],
-                    "domain": self.__cookie_domain,
-                }
-            )
-
-            driver.get(attempted_slot["book_class_url"])
-            make_reservation_button = wait.until(
-                EC.element_to_be_clickable((By.ID, "singleeventpayment"))
-            )
-            make_reservation_button.click()
-
-            make_payment_button = wait.until(
-                EC.element_to_be_clickable((By.ID, "btn_payment_bycredits"))
-            )
-            make_payment_button.click()
-            driver.quit()
-            desired_slot["state"] = SLOT_STATUS_BOOKED
-            logger.info(
-                f"Result booking slot day of week: {desired_slot['day_of_week']} time of day: {desired_slot['time_of_day']}, state: {desired_slot['state']}"
-            )
         except Exception as e:
             desired_slot["state"] = SLOT_STATUS_FAILED
             raise e
+
+    def __book_available_slot(self, cookies, desired_slot, attempted_slot):
+        driver = self.__prepare_chrome_driver()
+        wait = WebDriverWait(driver, 10)
+
+        driver.get("https://clients.onefitstop.com")
+        driver.add_cookie(
+            {
+                "name": "PHPSESSID",
+                "value": cookies["PHPSESSID"],
+                "domain": self.__cookie_domain,
+            }
+        )
+
+        driver.get(attempted_slot["book_class_url"])
+        make_reservation_button = wait.until(
+            EC.element_to_be_clickable((By.ID, "singleeventpayment"))
+        )
+        make_reservation_button.click()
+
+        make_payment_button = wait.until(
+            EC.element_to_be_clickable((By.ID, "btn_payment_bycredits"))
+        )
+        make_payment_button.click()
+        driver.quit()
+        desired_slot["state"] = SLOT_STATUS_BOOKED
+        logger.info(
+            f"Booked slot day of week: {desired_slot['day_of_week']} time of day: {desired_slot['time_of_day']}, state: {desired_slot['state']}"
+        )
+
+    def __join_waitlist(self, cookies, desired_slot, attempted_slot):
+        waitlist_url = urlparse(attempted_slot["join_waitlist_url"])
+        waitlist_url_query = parse_qs(waitlist_url.query)
+
+        resp = post(
+            f"{self.__base_url}/index.php?route=directory/directory/widgetjoinwaitlist&PHPSESSID=l7r83ftt7am7diqua8r86q9ll0",
+            params={
+                "route": "directory/directory/widgetjoinwaitlist",
+                "PHPSESSID": "l7r83ftt7am7diqua8r86q9ll0",
+            },
+            data={
+                "eid": waitlist_url_query["eid"][0],
+                "dirId": None,
+                "bstd": waitlist_url_query["bstd"][0],
+                "bookingfrom": "widget/directory/",
+                "joinwailist": "joinwailistYes",
+                "latecancelwaitlist": "movetowaitlist",
+                "bid": None,
+            },
+            allow_redirects=False,
+            cookies=cookies,
+            timeout=60,
+        )
+
+        if resp.status_code >= 400:
+            raise RuntimeError(
+                f"Fail to join waitlist, status {resp.status_code}, resp {resp.text}"
+            )
+
+        desired_slot["state"] = SLOT_STATUS_WAITLISTED
+        logger.info(
+            f"Joined waitlist slot day of week: {desired_slot['day_of_week']} time of day: {desired_slot['time_of_day']}, state: {desired_slot['state']}"
+        )
 
     def __prepare_chrome_driver(self):
         options = Options()
