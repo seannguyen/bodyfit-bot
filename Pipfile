@@ -11,6 +11,7 @@ selenium = "*"
 dynaconf = "*"
 flask = "*"
 sib-api-v3-sdk = "*"
+schedule = "*"
 
 [dev-packages]
 black = "*"

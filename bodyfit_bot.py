@@ -15,6 +15,8 @@ from config import settings
 import threading
 from urllib.parse import urlparse, parse_qs
 import sib_api_v3_sdk
+import schedule
+import time
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
@@ -348,6 +350,17 @@ class BodyfitBot:
         )
 
 
-if __name__ == "__main__":
+def bookingJob():
+    print("Start booking job")
     bodyfitBot = BodyfitBot()
     bodyfitBot.bookSlot()
+    print("Complete booking job")
+
+
+# schedule.every().saturday.at("15:00").do(bookingJob)
+schedule.every().sunday.at("16:00").do(bookingJob)
+
+if __name__ == "__main__":
+    while True:
+        schedule.run_pending()
+        time.sleep(1)
