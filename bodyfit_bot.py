@@ -25,6 +25,14 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+import bugsnag
+
+
+bugsnag.configure(
+    api_key=settings.bugsnag_api_key,
+    project_root=os.getcwd(),
+)
+
 
 SLOT_STATUS_PENDING = "SLOT_STATUS_PENDING"
 SLOT_STATUS_BOOKED = "SLOT_STATUS_BOOKED"

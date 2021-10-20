@@ -12,6 +12,7 @@ dynaconf = "*"
 flask = "*"
 sib-api-v3-sdk = "*"
 schedule = "*"
+bugsnag = "*"
 
 [dev-packages]
 black = "*"
