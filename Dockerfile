@@ -8,18 +8,18 @@ ENV PYTHONUNBUFFERED 1
 # Add src folder to PYTHONPATH
 ENV PYTHONPATH=/app
 
+WORKDIR /app
+
+# Install chrome and driver
+RUN apt-get update && apt-get install -y wget curl unzip gnupg2
+ADD bin/install_chrome.sh ./bin/
+RUN ./bin/install_chrome.sh
+
 # Install pip requirements
 ADD Pipfile .
 ADD Pipfile.lock .
 RUN python -m pip install pipenv
 RUN python -m pipenv install --deploy --system
-
-WORKDIR /app
-
-# Install chrome and driver
-ADD bin/install_chrome.sh ./bin/
-RUN apt-get update && apt-get install -y wget curl unzip gnupg2
-RUN ./bin/install_chrome.sh
 
 ADD ./*.py ./
 
