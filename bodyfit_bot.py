@@ -369,6 +369,7 @@ def bookingJob():
 schedule.every().sunday.at("16:00").do(bookingJob)
 
 if __name__ == "__main__":
+    logger.info("Bodyfit Bot Started")
     while True:
         schedule.run_pending()
         time.sleep(1)
