@@ -1,8 +1,8 @@
-from calendar import weekday
-from requests import post, get
+from requests import post
 import logging
 from bs4 import BeautifulSoup
 from datetime import datetime
+from datetime import timedelta
 import re
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -18,6 +18,9 @@ import sib_api_v3_sdk
 import schedule
 import time
 import bugsnag
+import asyncio
+import aiohttp
+from functools import reduce
 
 ENV_PRODUCTION = "production"
 ENV_DEVELOPMENT = "development"
@@ -74,14 +77,17 @@ class BodyfitBot:
         self.__email_sendTo = sib_api_v3_sdk.SendSmtpEmailTo(
             name=settings.notification_email, email=settings.notification_email
         )
+        self.__desired_slots = self.__get_desired_slot()
 
-    def bookSlot(self):
+    async def bookSlots(self):
         logger.info("Start booking slots")
         try:
             cookies = self.__login()
-            result = self.__getAndBookSlots(cookies)
-            logger.info(f"Result {result}")
-            self.__send_success_email(result)
+            req_cookies = {"PHPSESSID": cookies["PHPSESSID"]}
+            async with aiohttp.ClientSession(cookies=req_cookies) as http_session:
+                await self.__getAndBookSlots(cookies, http_session)
+                logger.info(f"Desired slots state: {self.__desired_slots}")
+                self.__send_success_email(self.__desired_slots)
         except Exception as e:
             logger.error(e)
             self.__send_failure_email()
@@ -89,17 +95,19 @@ class BodyfitBot:
         logger.info("Finished booking slots")
 
     def __send_failure_email(self):
+        now = datetime.now().strftime("%c")
         send_smtp_email = sib_api_v3_sdk.SendSmtpEmail(
             sender=self.__email_sender,
             to=[self.__email_sendTo],
-            html_content=f"{datetime.datetime.today()} Something went wrong when booking BFT classes, please check manually",
+            html_content=f"{now} Something went wrong when booking BFT classes, please check manually",
             subject="Something went wrong when booking BFT classes",
         )
 
         self.__email_api_instance.send_transac_email(send_smtp_email)
 
     def __send_success_email(self, results):
-        html_content = "<h3>Finished booking classes, here is the result</h3>"
+        now = datetime.now().strftime("%c")
+        html_content = f"<h3>Finished booking classes, here is the result {now}</h3>"
         for result_slot in results:
             date_str = (
                 result_slot["date"].strftime("%A, %B %d")
@@ -117,6 +125,7 @@ class BodyfitBot:
             elif result_slot["state"] == SLOT_STATUS_FULL:
                 status_str = "Fulled, unable to join waitlist"
             html_content += f"<p>{date_str} {time_str}: <b>{status_str}</b></p>"
+        html_content += f"Finished at {now}"
 
         send_smtp_email = sib_api_v3_sdk.SendSmtpEmail(
             sender=self.__email_sender,
@@ -151,99 +160,138 @@ class BodyfitBot:
         logger.info("Successfully logged-in")
         return resp.cookies
 
-    def __getAndBookSlots(self, cookies):
-        desired_slots = self.__get_desired_slot()
-        threads = list()
-        page = 1
-        while True:
-            slots_at_page = self.__getSlotsAtPage(cookies, page)
-            if slots_at_page is None:
-                break
+    async def __getAndBookSlots(self, cookies, http_session):
+        today = datetime.now()
+        await asyncio.gather(
+            self.__getAndBookSlotsFromDate(cookies, http_session, today),
+            self.__getAndBookSlotsFromDate(
+                cookies, http_session, today + timedelta(days=7)
+            ),
+        )
 
-            for desired_slot in desired_slots:
-                if desired_slot["state"] != SLOT_STATUS_PENDING:
-                    continue
-                if desired_slot["day_of_week"] in slots_at_page:
-                    slots_at_day = slots_at_page[desired_slot["day_of_week"]]
-                    if desired_slot["time_of_day"] in slots_at_day:
-                        attempted_slot = slots_at_day[desired_slot["time_of_day"]]
-                        t = threading.Thread(
-                            target=self.__attemptBook,
-                            args=(cookies, desired_slot, attempted_slot),
-                        )
-                        threads.append(t)
-                        t.start()
+    async def __getAndBookSlotsFromDate(self, cookies, http_session, start_date):
+        logger.info(
+            f"Get and book slot for 7 days starting {start_date.strftime('%x')}"
+        )
+
+        threads = []
+        page = 1
+        # just blindly fetch up to n page no mater if the page contain anything
+        aggressiveFetchedPage = 2
+        coroutines = []
+        for _ in range(aggressiveFetchedPage):
+            c = self.__getSlotAndBookAtPage(cookies, http_session, start_date, page)
+            coroutines.append(c)
+            page += 1
+        new_threads = await asyncio.gather(*coroutines)
+        threads = reduce(lambda x, y: x + y, new_threads)
+
+        while True:
+            new_threads = await self.__getSlotAndBookAtPage(
+                cookies, http_session, start_date, page
+            )
+            if not new_threads:
+                break
+            threads += new_threads
             page += 1
 
         for t in threads:
             t.join(60)
-        return desired_slots
 
-    def __getSlotsAtPage(self, cookies, page):
-        logger.info(f"Start fetch slots information from html page {page}")
-        resp = get(
-            f"{self.__base_url}/index.php?route=widget/directory/businessclass&trid={self.__trid}&mytrainer_id={self.__trainer_id}",
+    async def __getSlotAndBookAtPage(self, cookies, http_session, start_date, page):
+        threads = []
+
+        slots_at_page = await self.__getSlotsAtPage(http_session, page, start_date)
+        if not slots_at_page:  # None or empty
+            return []
+
+        for desired_slot in self.__desired_slots:
+            if desired_slot["state"] != SLOT_STATUS_PENDING:
+                continue
+            if desired_slot["day_of_week"] in slots_at_page:
+                slots_at_day = slots_at_page[desired_slot["day_of_week"]]
+                if desired_slot["time_of_day"] in slots_at_day:
+                    attempted_slot = slots_at_day[desired_slot["time_of_day"]]
+                    t = threading.Thread(
+                        target=self.__attemptBook,
+                        args=(cookies, desired_slot, attempted_slot),
+                    )
+                    threads.append(t)
+                    t.start()
+        return threads
+
+    async def __getSlotsAtPage(self, http_session, page, start_date):
+        logger.info(
+            f"Start fetch slots information from html page {page} for 7 days starting {start_date.strftime('%x')}"
+        )
+        start_date_str = start_date.strftime("%m/%d/%Y")
+
+        async with http_session.get(
+            f"{self.__base_url}/index.php",
             params={
+                "route": "widget/directory/businessclass",
                 "trid": self.__trid,
                 "mytrainer_id": self.__trainer_id,
                 "page": page,
+                "d": start_date_str,
             },
-            cookies=cookies,
-            timeout=30,
-        )
+        ) as resp:
+            if resp.status >= 400:
+                raise RuntimeError(
+                    f"Fail to get html list of slots, status {resp.status_code}, resp {resp.text}"
+                )
 
-        if resp.status_code >= 400:
-            raise RuntimeError(
-                f"Fail to get html list of slots, status {resp.status_code}, resp {resp.text}"
+            soup = BeautifulSoup(await resp.text(), "lxml")
+
+            day_schedules = soup.select(
+                ".schedule-list > ul > li:not(.schedule-list-head)"
             )
 
-        soup = BeautifulSoup(resp.text, "lxml")
+            slots_by_weekday = {}
+            for day_schedule in day_schedules:
+                if day_schedule.find(text=re.compile(".*No Class scheduled.*")):
+                    continue
 
-        if soup.find(text=re.compile(".*No Class scheduled.*")):
-            return None
+                date_str = day_schedule.select_one(".schedule-list-day").text
+                slot_date = datetime.strptime(date_str, "%A, %B %d, %Y")
+                weekday_key = slot_date.strftime("%a")
+                if weekday_key not in slots_by_weekday:
+                    slots_by_weekday[weekday_key] = {}
+                slots = day_schedule.select(".schedule")
+                for slot in slots:
+                    slot_state = SLOT_STATUS_PENDING
+                    if slot.find("p", text=re.compile(".*Booked.*")):
+                        slot_state = SLOT_STATUS_BOOKED
+                    elif slot.find("span", text="Class Full"):
+                        slot_state = SLOT_STATUS_FULL
+                    elif slot.find("span", text="Already in waitlist"):
+                        slot_state = SLOT_STATUS_WAITLISTED
 
-        day_schedules = soup.select(".schedule-list > ul > li:not(.schedule-list-head)")
+                    book_class_button = slot.select_one("button.bookClass")
+                    book_class_url = None
+                    if book_class_button:
+                        onclick_content = book_class_button["onclick"]
+                        m = re.search("'(https.*)'", onclick_content)
+                        book_class_url = m.group(1)
+                    join_waitlist_button = slot.select_one("button.join_wait_list")
+                    join_waitlist_url = None
+                    if join_waitlist_button:
+                        join_waitlist_url = join_waitlist_button["data-purl"]
+                        slot_state = SLOT_STATUS_WAITLISTABLE
 
-        slots_by_weekday = {}
-        for day_schedule in day_schedules:
-            date_str = day_schedule.select_one(".schedule-list-day").text
-            slot_date = datetime.strptime(date_str, "%A, %B %d, %Y")
-            weekday_key = slot_date.strftime("%a")
-            if weekday_key not in slots_by_weekday:
-                slots_by_weekday[weekday_key] = {}
-            slots = day_schedule.select(".schedule")
-            for slot in slots:
-                slot_state = SLOT_STATUS_PENDING
-                if slot.find("p", text=re.compile(".*Booked.*")):
-                    slot_state = SLOT_STATUS_BOOKED
-                elif slot.find("span", text="Class Full"):
-                    slot_state = SLOT_STATUS_FULL
-                elif slot.find("span", text="Already in waitlist"):
-                    slot_state = SLOT_STATUS_WAITLISTED
-
-                book_class_button = slot.select_one("button.bookClass")
-                book_class_url = None
-                if book_class_button:
-                    onclick_content = book_class_button["onclick"]
-                    m = re.search("'(https.*)'", onclick_content)
-                    book_class_url = m.group(1)
-                join_waitlist_button = slot.select_one("button.join_wait_list")
-                join_waitlist_url = None
-                if join_waitlist_button:
-                    join_waitlist_url = join_waitlist_button["data-purl"]
-                    slot_state = SLOT_STATUS_WAITLISTABLE
-
-                time_str = slot.select_one(":first-child").text.split("to")[0]
-                time_str = time_str.strip()
-                slot_time = datetime.strptime(time_str, "%I:%M %p")
-                slots_by_weekday[weekday_key][slot_time.strftime("%H:%M")] = {
-                    "state": slot_state,
-                    "book_class_url": book_class_url,
-                    "join_waitlist_url": join_waitlist_url,
-                    "date": slot_date,
-                }
-        logger.info(f"Success parse slots information from html page {page}")
-        return slots_by_weekday
+                    time_str = slot.select_one(":first-child").text.split("to")[0]
+                    time_str = time_str.strip()
+                    slot_time = datetime.strptime(time_str, "%I:%M %p")
+                    slots_by_weekday[weekday_key][slot_time.strftime("%H:%M")] = {
+                        "state": slot_state,
+                        "book_class_url": book_class_url,
+                        "join_waitlist_url": join_waitlist_url,
+                        "date": slot_date,
+                    }
+            logger.info(
+                f"Success parse slots information from html page {page} for 7 days starting {start_date.strftime('%x')}"
+            )
+            return slots_by_weekday
 
     def __attemptBook(self, cookies, desired_slot, attempted_slot):
         logger.info(
@@ -318,7 +366,7 @@ class BodyfitBot:
             },
             allow_redirects=False,
             cookies=cookies,
-            timeout=30,
+            timeout=60,
         )
 
         if resp.status_code >= 400:
@@ -363,10 +411,10 @@ class BodyfitBot:
 
 
 def bookingJob():
-    print("Start booking job")
+    logger.info("Start booking job")
     bodyfitBot = BodyfitBot()
-    bodyfitBot.bookSlot()
-    print("Complete booking job")
+    asyncio.run(bodyfitBot.bookSlots())
+    logger.info("Complete booking job")
 
 
 schedule.every().saturday.at("15:00").do(bookingJob)
