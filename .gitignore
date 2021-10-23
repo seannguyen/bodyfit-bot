@@ -4,3 +4,5 @@ settings.toml
 
 /temp
 /bin_lib
+
+/__pycache__
