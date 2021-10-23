@@ -365,8 +365,7 @@ def bookingJob():
     print("Complete booking job")
 
 
-# schedule.every().saturday.at("15:00").do(bookingJob)
-schedule.every().sunday.at("16:00").do(bookingJob)
+schedule.every().saturday.at("15:00").do(bookingJob)
 
 if __name__ == "__main__":
     logger.info("Bodyfit Bot Started")
