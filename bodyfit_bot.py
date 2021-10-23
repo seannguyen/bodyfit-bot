@@ -17,6 +17,10 @@ from urllib.parse import urlparse, parse_qs
 import sib_api_v3_sdk
 import schedule
 import time
+import bugsnag
+
+ENV_PRODUCTION = "production"
+ENV_DEVELOPMENT = "development"
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
@@ -25,12 +29,12 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-import bugsnag
-
 
 bugsnag.configure(
     api_key=settings.bugsnag_api_key,
     project_root=os.getcwd(),
+    release_stage=settings.env,
+    notify_release_stages=[ENV_PRODUCTION],
 )
 
 
@@ -368,7 +372,13 @@ def bookingJob():
 schedule.every().saturday.at("15:00").do(bookingJob)
 
 if __name__ == "__main__":
-    logger.info("Bodyfit Bot Started")
-    while True:
-        schedule.run_pending()
-        time.sleep(1)
+    logger.info(f"Bodyfit Bot {settings.env} Started")
+    if settings.env == ENV_DEVELOPMENT:
+        bookingJob()
+    elif settings.env == ENV_PRODUCTION:
+        logger.info("Scheduling loop started")
+        while True:
+            schedule.run_pending()
+            time.sleep(1)
+    else:
+        raise RuntimeError(f"ENV setting '{settings.env}' is not set correctly")
