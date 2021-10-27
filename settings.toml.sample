@@ -1,0 +1,12 @@
+env="development"
+email = "example@gmail.com"
+password = "123456"
+trainer_id = 123456
+trid = "ABCDEF"
+notification_email = "example@gmail.com"
+desired_slots = [
+  { day_of_week="Thu", time_of_day="12:00"},
+  { day_of_week="Sat", time_of_day="15:15"}
+]
+sendinblue_api_key="secret"
+bugsnag_api_key = "secret"

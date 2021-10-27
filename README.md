@@ -26,6 +26,11 @@
   - Join Waitlist:
     - Is simpler just construct a POST request base on the URL in the "Join Waitlist" button and submit it.
 
+## Getting Started
+- Base on the sample settings file `./settings.toml.sample` create a development `settings.toml` file with config that you can start testing with locally
+- Install dependencies: `pipenv install --dev`
+- Execute the script: `pipenv run python bodyfit_bot.py`
+
 ## Release
 ```sh
 docker build . -t seannguyen/bodyfit-bot
