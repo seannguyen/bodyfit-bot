@@ -12,7 +12,6 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 import os
 from config import settings
-import threading
 from urllib.parse import urlparse, parse_qs
 import sib_api_v3_sdk
 import schedule
@@ -20,7 +19,6 @@ import time
 import bugsnag
 import asyncio
 import aiohttp
-from functools import reduce
 
 ENV_PRODUCTION = "production"
 ENV_DEVELOPMENT = "development"
@@ -174,37 +172,34 @@ class BodyfitBot:
             f"Get and book slot for 7 days starting {start_date.strftime('%x')}"
         )
 
-        threads = []
-        page = 1
         # just blindly fetch up to n page no mater if the page contain anything
         aggressiveFetchedPage = 2
-        coroutines = []
-        for _ in range(aggressiveFetchedPage):
-            c = self.__getSlotAndBookAtPage(cookies, http_session, start_date, page)
-            coroutines.append(c)
-            page += 1
-        new_threads = await asyncio.gather(*coroutines)
-        threads = reduce(lambda x, y: x + y, new_threads)
+        currentPage = aggressiveFetchedPage + 1
 
+        # Give priority to the aggressive pages first
+        coroutines = [
+            self.__getSlotAndBookAtPage(cookies, http_session, start_date, i + 1)
+            for i in range(aggressiveFetchedPage)
+        ]
+        await asyncio.gather(*coroutines)
+
+        # Process anything else later
         while True:
-            new_threads = await self.__getSlotAndBookAtPage(
-                cookies, http_session, start_date, page
+            isEmptyPage = await self.__getSlotAndBookAtPage(
+                cookies, http_session, start_date, currentPage
             )
-            if not new_threads:
+            if isEmptyPage:
                 break
-            threads += new_threads
-            page += 1
-
-        for t in threads:
-            t.join(60)
+            currentPage += 1
 
     async def __getSlotAndBookAtPage(self, cookies, http_session, start_date, page):
-        threads = []
+        coroutines = []
 
         slots_at_page = await self.__getSlotsAtPage(http_session, page, start_date)
         if not slots_at_page:  # None or empty
-            return []
+            return True
 
+        loop = asyncio.get_running_loop()
         for desired_slot in self.__desired_slots:
             if desired_slot["state"] != SLOT_STATUS_PENDING:
                 continue
@@ -212,13 +207,12 @@ class BodyfitBot:
                 slots_at_day = slots_at_page[desired_slot["day_of_week"]]
                 if desired_slot["time_of_day"] in slots_at_day:
                     attempted_slot = slots_at_day[desired_slot["time_of_day"]]
-                    t = threading.Thread(
-                        target=self.__attemptBook,
-                        args=(cookies, desired_slot, attempted_slot),
+                    c = loop.run_in_executor(
+                        None, self.__attemptBook, cookies, desired_slot, attempted_slot
                     )
-                    threads.append(t)
-                    t.start()
-        return threads
+                    coroutines.append(c)
+        await asyncio.gather(*coroutines)
+        return False
 
     async def __getSlotsAtPage(self, http_session, page, start_date):
         logger.info(
@@ -413,7 +407,7 @@ class BodyfitBot:
 def bookingJob():
     logger.info("Start booking job")
     bodyfitBot = BodyfitBot()
-    asyncio.run(bodyfitBot.bookSlots())
+    asyncio.run(asyncio.wait_for(bodyfitBot.bookSlots(), 300))
     logger.info("Complete booking job")
 
 
