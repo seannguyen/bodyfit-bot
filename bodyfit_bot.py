@@ -1,8 +1,7 @@
 from requests import post
 import logging
 from bs4 import BeautifulSoup
-from datetime import datetime
-from datetime import timedelta
+from datetime import timedelta, datetime
 import re
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -48,6 +47,9 @@ SLOT_STATUS_FAILED = "SLOT_STATUS_FAILED"
 
 
 class BodyfitBot:
+    __VISUAL_WAIT_TIME_SEC = 10
+    __REQUEST_WAIT_TIME_SEC = 180
+
     __cookie_domain = "onefitstop.com"
     __domain = "clients.onefitstop.com"
     __base_url = f"https://{__domain}"
@@ -75,14 +77,17 @@ class BodyfitBot:
         self.__email_sendTo = sib_api_v3_sdk.SendSmtpEmailTo(
             name=settings.notification_email, email=settings.notification_email
         )
-        self.__desired_slots = self.__get_desired_slot()
+        self.__desired_slots = self.__getDesiredSlot()
 
     async def bookSlots(self):
         logger.info("Start booking slots")
         try:
             cookies = self.__login()
             req_cookies = {"PHPSESSID": cookies["PHPSESSID"]}
-            async with aiohttp.ClientSession(cookies=req_cookies) as http_session:
+            timeout = aiohttp.ClientTimeout(total=self.__REQUEST_WAIT_TIME_SEC)
+            async with aiohttp.ClientSession(
+                cookies=req_cookies, timeout=timeout
+            ) as http_session:
                 await self.__getAndBookSlots(cookies, http_session)
                 logger.info(f"Desired slots state: {self.__desired_slots}")
                 self.__send_success_email(self.__desired_slots)
@@ -147,7 +152,7 @@ class BodyfitBot:
                 "trid": self.__trid,
             },
             allow_redirects=False,
-            timeout=30,
+            timeout=self.__REQUEST_WAIT_TIME_SEC,
         )
 
         if resp.status_code >= 400:
@@ -184,7 +189,8 @@ class BodyfitBot:
         await asyncio.gather(*coroutines)
 
         # Process anything else later
-        while True:
+        max_page = 4
+        while currentPage <= max_page:
             isEmptyPage = await self.__getSlotAndBookAtPage(
                 cookies, http_session, start_date, currentPage
             )
@@ -214,11 +220,13 @@ class BodyfitBot:
         await asyncio.gather(*coroutines)
         return False
 
-    async def __getSlotsAtPage(self, http_session, page, start_date):
+    async def __getSlotsAtPage(
+        self, http_session, page, start_date, date_format="%d/%m/%Y"
+    ):
         logger.info(
             f"Start fetch slots information from html page {page} for 7 days starting {start_date.strftime('%x')}"
         )
-        start_date_str = start_date.strftime("%m/%d/%Y")
+        start_date_str = start_date.strftime(date_format)
 
         async with http_session.get(
             f"{self.__base_url}/index.php",
@@ -236,6 +244,17 @@ class BodyfitBot:
                 )
 
             soup = BeautifulSoup(await resp.text(), "lxml")
+
+            today = datetime.now()
+            today_from_html = soup.select_one("#today_date_id")["value"]
+            if today.strftime(date_format) != today_from_html:
+                alternative_date_format = "%m/%d/%Y"
+                logger.warning(
+                    f"Date format assumption {date_format} is incorrect, try alternative {alternative_date_format}"
+                )
+                return await self.__getSlotsAtPage(
+                    http_session, page, start_date, alternative_date_format
+                )
 
             day_schedules = soup.select(
                 ".schedule-list > ul > li:not(.schedule-list-head)"
@@ -311,8 +330,8 @@ class BodyfitBot:
             raise e
 
     def __book_available_slot(self, cookies, desired_slot, attempted_slot):
-        driver = self.__prepare_chrome_driver()
-        wait = WebDriverWait(driver, 10)
+        driver = self.__prepareChromeDriver()
+        wait = WebDriverWait(driver, self.__VISUAL_WAIT_TIME_SEC)
 
         driver.get("https://clients.onefitstop.com")
         driver.add_cookie(
@@ -360,7 +379,7 @@ class BodyfitBot:
             },
             allow_redirects=False,
             cookies=cookies,
-            timeout=60,
+            timeout=self.__REQUEST_WAIT_TIME_SEC,
         )
 
         if resp.status_code >= 400:
@@ -373,7 +392,7 @@ class BodyfitBot:
             f"Joined waitlist slot day of week: {desired_slot['day_of_week']} time of day: {desired_slot['time_of_day']}, state: {desired_slot['state']}"
         )
 
-    def __prepare_chrome_driver(self):
+    def __prepareChromeDriver(self):
         options = Options()
         options.add_argument("--headless")
         options.add_argument("--no-sandbox")
@@ -390,7 +409,7 @@ class BodyfitBot:
         driver.implicitly_wait(1)
         return driver
 
-    def __get_desired_slot(self):
+    def __getDesiredSlot(self):
         return list(
             map(
                 lambda i: {
