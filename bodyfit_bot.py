@@ -183,7 +183,16 @@ class BodyfitBot:
 
         # Give priority to the aggressive pages first
         coroutines = [
-            self.__getSlotAndBookAtPage(cookies, http_session, start_date, i + 1)
+            self.__getSlotAndBookAtPage(
+                cookies, http_session, start_date, i + 1, "%d/%m/%Y"
+            )
+            for i in range(aggressiveFetchedPage)
+        ]
+        # Try with the US date format due to the behavior of the website if inconsistent, use both format randomly
+        coroutines += [
+            self.__getSlotAndBookAtPage(
+                cookies, http_session, start_date, i + 1, "%m/%d/%Y"
+            )
             for i in range(aggressiveFetchedPage)
         ]
         await asyncio.gather(*coroutines)
@@ -192,16 +201,20 @@ class BodyfitBot:
         max_page = 4
         while currentPage <= max_page:
             isEmptyPage = await self.__getSlotAndBookAtPage(
-                cookies, http_session, start_date, currentPage
+                cookies, http_session, start_date, currentPage, "%d/%m/%Y"
             )
             if isEmptyPage:
                 break
             currentPage += 1
 
-    async def __getSlotAndBookAtPage(self, cookies, http_session, start_date, page):
+    async def __getSlotAndBookAtPage(
+        self, cookies, http_session, start_date, page, date_format
+    ):
         coroutines = []
 
-        slots_at_page = await self.__getSlotsAtPage(http_session, page, start_date)
+        slots_at_page = await self.__getSlotsAtPage(
+            http_session, page, start_date, date_format
+        )
         if not slots_at_page:  # None or empty
             return True
 
@@ -223,10 +236,10 @@ class BodyfitBot:
     async def __getSlotsAtPage(
         self, http_session, page, start_date, date_format="%d/%m/%Y"
     ):
-        logger.info(
-            f"Start fetch slots information from html page {page} for 7 days starting {start_date.strftime('%x')}"
-        )
         start_date_str = start_date.strftime(date_format)
+        logger.info(
+            f"Start fetch slots information from html page {page} for 7 days starting {start_date_str} using {date_format} format"
+        )
 
         async with http_session.get(
             f"{self.__base_url}/index.php",
@@ -248,13 +261,10 @@ class BodyfitBot:
             today = datetime.now()
             today_from_html = soup.select_one("#today_date_id")["value"]
             if today.strftime(date_format) != today_from_html:
-                alternative_date_format = "%m/%d/%Y"
                 logger.warning(
-                    f"Date format assumption {date_format} is incorrect, try alternative {alternative_date_format}"
+                    f"Date format assumption {start_date_str} ({date_format}) is incorrect"
                 )
-                return await self.__getSlotsAtPage(
-                    http_session, page, start_date, alternative_date_format
-                )
+                return None
 
             day_schedules = soup.select(
                 ".schedule-list > ul > li:not(.schedule-list-head)"
@@ -302,7 +312,7 @@ class BodyfitBot:
                         "date": slot_date,
                     }
             logger.info(
-                f"Success parse slots information from html page {page} for 7 days starting {start_date.strftime('%x')}"
+                f"Success parse slots information from html page {page} for 7 days starting {start_date_str}"
             )
             return slots_by_weekday
 
