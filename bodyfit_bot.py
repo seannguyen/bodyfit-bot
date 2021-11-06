@@ -93,6 +93,7 @@ class BodyfitBot:
                 self.__send_success_email(self.__desired_slots)
         except Exception as e:
             logger.error(e)
+            bugsnag.notify(e)
             self.__send_failure_email()
 
         logger.info("Finished booking slots")
@@ -178,34 +179,22 @@ class BodyfitBot:
         )
 
         # just blindly fetch up to n page no mater if the page contain anything
-        aggressiveFetchedPage = 2
-        currentPage = aggressiveFetchedPage + 1
-
         # Give priority to the aggressive pages first
-        coroutines = [
-            self.__getSlotAndBookAtPage(
-                cookies, http_session, start_date, i + 1, "%d/%m/%Y"
-            )
-            for i in range(aggressiveFetchedPage)
-        ]
-        # Try with the US date format due to the behavior of the website if inconsistent, use both format randomly
-        coroutines += [
-            self.__getSlotAndBookAtPage(
-                cookies, http_session, start_date, i + 1, "%m/%d/%Y"
-            )
-            for i in range(aggressiveFetchedPage)
-        ]
-        await asyncio.gather(*coroutines)
+        aggressiveFetchedPage = 1
+        await self.__getSlotAndBookAtPage(
+            cookies, http_session, start_date, aggressiveFetchedPage, "%d/%m/%Y"
+        )
 
-        # Process anything else later
-        max_page = 4
-        while currentPage <= max_page:
-            isEmptyPage = await self.__getSlotAndBookAtPage(
-                cookies, http_session, start_date, currentPage, "%d/%m/%Y"
-            )
-            if isEmptyPage:
-                break
-            currentPage += 1
+        # Process anything else later: turned out to be quite wasteful, so disabled
+        # currentPage = aggressiveFetchedPage + 1
+        # max_page = 2
+        # while currentPage <= max_page:
+        #     isEmptyPage = await self.__getSlotAndBookAtPage(
+        #         cookies, http_session, start_date, currentPage, "%d/%m/%Y"
+        #     )
+        #     if isEmptyPage:
+        #         break
+        #     currentPage += 1
 
     async def __getSlotAndBookAtPage(
         self, cookies, http_session, start_date, page, date_format
@@ -324,20 +313,16 @@ class BodyfitBot:
             desired_slot["date"] = attempted_slot["date"]
             if attempted_slot["state"] == SLOT_STATUS_PENDING:
                 self.__book_available_slot(cookies, desired_slot, attempted_slot)
-                return
-            if attempted_slot["state"] == SLOT_STATUS_WAITLISTABLE:
+            elif attempted_slot["state"] == SLOT_STATUS_WAITLISTABLE:
                 self.__join_waitlist(cookies, desired_slot, attempted_slot)
-                return
-            if attempted_slot["state"] != SLOT_STATUS_PENDING:
+            elif attempted_slot["state"] != SLOT_STATUS_PENDING:
                 desired_slot["state"] = attempted_slot["state"]
-                logger.info(
-                    f"Result booking slot day of week: {desired_slot['day_of_week']} time of day: {desired_slot['time_of_day']}, state: {desired_slot['state']}"
-                )
-                return
-
+            logger.info(
+                f"Result booking slot day of week: {desired_slot['day_of_week']} time of day: {desired_slot['time_of_day']}, state: {desired_slot['state']}"
+            )
         except Exception as e:
             desired_slot["state"] = SLOT_STATUS_FAILED
-            raise e
+            logger.warning(f"Fail to book {attempted_slot['date']} with ERR {e}")
 
     def __book_available_slot(self, cookies, desired_slot, attempted_slot):
         driver = self.__prepareChromeDriver()
