@@ -424,7 +424,7 @@ def bookingJob():
     logger.info("Complete booking job")
 
 
-schedule.every().saturday.at("15:00").do(bookingJob)
+schedule.every().saturday.at("16:00").do(bookingJob)
 
 if __name__ == "__main__":
     logger.info(f"Bodyfit Bot {settings.env} Started")
